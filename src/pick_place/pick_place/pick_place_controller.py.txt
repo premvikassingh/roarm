@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import Float64
+import time
+
+class PickAndPlaceController(Node):
+    def __init__(self):
+        super().__init__('pick_place_controller')
+
+        # ==========================================
+        # 1. SET ROVER BIN COORDINATES HERE (Meters)
+        # ==========================================
+        self.bin_x = -0.15 
+        self.bin_y = 0.00   
+        self.bin_z = 0.25   
+
+        self.is_busy = False 
+
+        # ==========================================
+        # 2. MATCHED HARDWARE TOPICS FROM GUIDE
+        # ==========================================
+        # Listens to the OAK-D ArUco detection node
+        self.target_sub = self.create_subscription(
+            PoseStamped,
+            '/aruco_pose', 
+            self.perception_callback,
+            10
+        )
+
+        # Commands the MoveIt node and Gripper server
+        self.arm_pose_pub = self.create_publisher(PoseStamped, '/roarm/command/pose', 10)
+        self.gripper_pub = self.create_publisher(Float64, '/gripper_cmd', 10)
+
+        self.get_logger().info("Rover Custom Pick-and-Place Node Active. Waiting for ArUco marker...")
+
+    def perception_callback(self, msg):
+        if self.is_busy:
+            return  
+
+        self.get_logger().info(f"Target found at X:{msg.pose.position.x:.3f}, Y:{msg.pose.position.y:.3f}, Z:{msg.pose.position.z:.3f}")
+        self.execute_pick_and_place(msg.pose)
+
+    def execute_pick_and_place(self, target_pose):
+        self.is_busy = True
+        try:
+            # 1. Approach Hover
+            approach = PoseStamped()
+            approach.header.frame_id = 'base_link'
+            approach.pose.position.x = target_pose.position.x
+            approach.pose.position.y = target_pose.position.y
+            approach.pose.position.z = target_pose.position.z + 0.10 
+            self.arm_pose_pub.publish(approach)
+            time.sleep(3.0) 
+
+            # 2. Descend to Grasp
+            grasp = PoseStamped()
+            grasp.header.frame_id = 'base_link'
+            grasp.pose = target_pose
+            self.arm_pose_pub.publish(grasp)
+            time.sleep(2.0)
+
+            # 3. Close Gripper (1.0 = close)
+            gripper_msg = Float64()
+            gripper_msg.data = 1.0 
+            self.gripper_pub.publish(gripper_msg)
+            time.sleep(1.0)
+
+            # 4. Lift up
+            self.arm_pose_pub.publish(approach)
+            time.sleep(2.0)
+
+            # 5. Move to Rover Storage Bin
+            bin_pose = PoseStamped()
+            bin_pose.header.frame_id = 'base_link'
+            bin_pose.pose.position.x = self.bin_x
+            bin_pose.pose.position.y = self.bin_y
+            bin_pose.pose.position.z = self.bin_z
+            self.arm_pose_pub.publish(bin_pose)
+            time.sleep(4.0)
+
+            # 6. Release (0.0 = open)
+            gripper_msg.data = 0.0 
+            self.gripper_pub.publish(gripper_msg)
+            time.sleep(1.5)
+
+            # 7. Return to Safe Transport Pose
+            home_pose = PoseStamped()
+            home_pose.header.frame_id = 'base_link'
+            home_pose.pose.position.x = 0.15
+            home_pose.pose.position.y = 0.00
+            home_pose.pose.position.z = 0.30
+            self.arm_pose_pub.publish(home_pose)
+            time.sleep(3.0)
+
+        except Exception as e:
+            self.get_logger().error(f"Execution Error: {e}")
+        finally:
+            self.get_logger().info("Cycle complete.")
+            self.is_busy = False
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = PickAndPlaceController()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
