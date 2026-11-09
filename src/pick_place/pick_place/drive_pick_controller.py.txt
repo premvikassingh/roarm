@@ -1,0 +1,77 @@
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped, Twist
+from std_msgs.msg import Float32 # Or whatever your gripper uses
+
+class PickAndPlaceController(Node):
+    def __init__(self):
+        super().__init__('pick_place_controller')
+        
+        # Original Arm Publishers
+        self.arm_pub = self.create_publisher(PoseStamped, '/roarm/command/pose', 10)
+        self.gripper_pub = self.create_publisher(Float32, '/gripper_cmd', 10)
+        
+        # NEW: Chassis Velocity Publisher
+        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        
+        # Subscriber for ArUco
+        self.aruco_sub = self.create_subscription(PoseStamped, '/aruco_pose', self.aruco_callback, 10)
+        
+        # NEW: Robot States and Reach Limits
+        self.state = 'SEARCHING'  # States: SEARCHING, DRIVING, PICKING, DONE
+        self.arm_reach_limit = 0.25  # 25 cm maximum picking distance
+        
+        # Bin coordinates (from your physical measurements)
+        self.bin_x = 0.20
+        self.bin_y = 0.00
+        self.bin_z = 0.15
+
+    def aruco_callback(self, msg):
+        if self.state == 'DONE':
+            return
+            
+        target_x = msg.pose.position.x
+        target_y = msg.pose.position.y # Left/Right offset
+        
+        if self.state == 'SEARCHING':
+            self.get_logger().info('Target spotted! Aligning and driving...')
+            self.state = 'DRIVING'
+            
+        elif self.state == 'DRIVING':
+            twist = Twist()
+            
+            # If the object is further than 25cm, drive forward
+            if target_x > self.arm_reach_limit:
+                twist.linear.x = 0.1  # Drive forward at 0.1 m/s
+                
+                # Steer left/right to keep the marker centered in the camera
+                # Multiplier (1.5) acts as a proportional controller for steering
+                twist.angular.z = target_y * 1.5 
+                
+                self.cmd_vel_pub.publish(twist)
+                
+            else:
+                # Target is within 25cm reach! Stop the chassis.
+                twist.linear.x = 0.0
+                twist.angular.z = 0.0
+                self.cmd_vel_pub.publish(twist)
+                
+                self.get_logger().info('Target in range. Stopping chassis and starting arm sequence.')
+                self.state = 'PICKING'
+                self.execute_pick_place(msg)
+
+    def execute_pick_place(self, target_pose):
+        # Your original arm picking and bin dropping logic goes here
+        self.get_logger().info('Arm grasping sequence initiated...')
+        # (Arm moves to target_pose, gripper closes, arm moves to self.bin_x/y/z, gripper opens)
+        self.state = 'DONE'
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = PickAndPlaceController()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
